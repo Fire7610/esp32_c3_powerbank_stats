@@ -98,7 +98,7 @@ void setup() {
     u8g2.setFont(u8g2_font_7x14_tf);
     u8g2.drawStr(0, 14, "Powerbank Ready");
     u8g2.sendBuffer();
-    delay(2000);
+    delay(500);
 }
 
 void loop() {
@@ -141,9 +141,12 @@ void loop() {
         u8g2.drawStr(64, 14, buf);
 
         snprintf(buf, sizeof(buf), "P: %.2fW", power);
-        u8g2.drawStr(0, 28, buf);
+        
+        u8g2.drawStr((128 - u8g2.getStrWidth(buf)) / 2, 28, buf);
 
-        u8g2.drawStr(64, 28, status);
+        snprintf(buf, sizeof(buf), "%s", status);
+        u8g2.drawStr((128 - u8g2.getStrWidth(buf)) / 2, 42, buf);
+
         u8g2.sendBuffer();
     } else {
         u8g2.setPowerSave(1);
@@ -332,8 +335,32 @@ void handleSerialInput() {
         else if(input.equalsIgnoreCase("show")){
             showCalibrationPoints();
         }
+        else if (input.startsWith("removev")) {  
+            int index = input.substring(8).toInt();
+            if (index >= 0 && index < voltageCalibrationPointCount) {
+                for (int i = index; i < voltageCalibrationPointCount - 1; i++) {
+                    voltageCalibration[i] = voltageCalibration[i + 1];
+                }
+                voltageCalibrationPointCount--;
+                Serial.printf("Removed Voltage Calibration Point at index %d\n", index);
+            } else {
+                Serial.println("Invalid index for voltage calibration point!");
+            }
+        }
+        else if (input.startsWith("removew")) {  
+            int index = input.substring(8).toInt();
+            if (index >= 0 && index < wattageCalibrationPointCount) {
+                for (int i = index; i < wattageCalibrationPointCount - 1; i++) {
+                    wattageCalibration[i] = wattageCalibration[i + 1];
+                }
+                wattageCalibrationPointCount--;
+                Serial.printf("Removed Wattage Calibration Point at index %d\n", index);
+            } else {
+                Serial.println("Invalid index for wattage calibration point!");
+            }
+        }
         else {
-          Serial.println("Invalid command! Use +a10 / -a10 / addv[voltage] / addw[wattage] / resetv / resetw / save / show");
+          Serial.println("Invalid command!\n addv[voltage] / addw[wattage]\n resetv / resetw\n removew[index] removev[index] \nsave / show");
         }
     }
 }
