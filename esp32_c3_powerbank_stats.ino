@@ -2,7 +2,7 @@
 #include <GyverINA.h>
 #include <U8g2lib.h>
 #include <EEPROM.h>
-#include <math.h>
+#include <cmath>  // Use <cmath> instead of <math.h>
 
 // I2C pins for ESP32-C3
 #define I2C_SDA 5
@@ -18,14 +18,17 @@ const float MAX_EXPECTED_AMPS = 7.0;
 // EEPROM Addresses
 #define EEPROM_ADDRESS_CURRENT 0
 #define EEPROM_ADDRESS_VOLTAGE_POINTS 10  
+#define EEPROM_ADDRESS_VOLTAGE_COUNT (EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration))
+#define EEPROM_ADDRESS_WATTAGE_POINTS (EEPROM_ADDRESS_VOLTAGE_COUNT + sizeof(voltageCalibrationPointCount))
+#define EEPROM_ADDRESS_WATTAGE_COUNT (EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration))
 
 // Max calibration points
 #define MAX_CALIBRATION_POINTS 50  
 
 // Calibration point struct
 struct CalibrationPoint {
-    float measuredVoltage;  
-    float rawVoltage;       
+    float measuredValue;  
+    float rawValue;       
 };
 
 // Create INA226 object
@@ -40,7 +43,9 @@ const unsigned long debounceDelay = 200;
 
 uint16_t currentCalibrationValue;
 CalibrationPoint voltageCalibration[MAX_CALIBRATION_POINTS];  
-int calibrationPointCount = 0;  
+CalibrationPoint wattageCalibration[MAX_CALIBRATION_POINTS];  
+int voltageCalibrationPointCount = 0;  
+int wattageCalibrationPointCount = 0;  
 
 void setup() {
     Serial.begin(115200);
@@ -48,7 +53,7 @@ void setup() {
 
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     Wire.begin(I2C_SDA, I2C_SCL);
-    EEPROM.begin(1024);  // Increased storage size for large calibration points
+    EEPROM.begin(2048);  // Increased storage size for large calibration points
 
     if (!ina226.begin()) {
         Serial.println("ERROR: INA226 not detected!");
@@ -65,17 +70,24 @@ void setup() {
         ina226.setCalibration(currentCalibrationValue);
     }
 
-    // Load voltage correction points
+    EEPROM.get(EEPROM_ADDRESS_VOLTAGE_COUNT, voltageCalibrationPointCount);
     EEPROM.get(EEPROM_ADDRESS_VOLTAGE_POINTS, voltageCalibration);
-    EEPROM.get(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), calibrationPointCount);
+    EEPROM.get(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), voltageCalibrationPointCount);
+
+    EEPROM.get(EEPROM_ADDRESS_WATTAGE_COUNT, wattageCalibrationPointCount);
+    EEPROM.get(EEPROM_ADDRESS_WATTAGE_POINTS, wattageCalibration);
+    EEPROM.get(EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration), wattageCalibrationPointCount);
 
     // Prevent invalid EEPROM data corruption
-    if (calibrationPointCount > MAX_CALIBRATION_POINTS || calibrationPointCount < 0) {
-        calibrationPointCount = 0;
+    if (voltageCalibrationPointCount > MAX_CALIBRATION_POINTS || voltageCalibrationPointCount < 0) {
+        voltageCalibrationPointCount = 0;
+    }
+    if (wattageCalibrationPointCount > MAX_CALIBRATION_POINTS || wattageCalibrationPointCount < 0) {
+        wattageCalibrationPointCount = 0;
     }
 
-    Serial.printf("Loaded Calibration - Current: %d, Voltage Points: %d\n",
-                  currentCalibrationValue, calibrationPointCount);
+    Serial.printf("Loaded Calibration - Current: %d, Voltage Points: %d, Wattage Points: %d\n",
+                  currentCalibrationValue, voltageCalibrationPointCount, wattageCalibrationPointCount);
 
     ina226.setAveraging(INA226_AVG_X4);
     ina226.setSampleTime(INA226_VBUS, INA226_CONV_140US);
@@ -105,16 +117,14 @@ void loop() {
 
     float rawBusVoltage = ina226.getVoltage();
     float busVoltage = applyVoltageCorrection(rawBusVoltage);
-    float current = ina226.getCurrent();
-    float power = busVoltage * current;
+    float rawPower = fabs(busVoltage * ina226.getCurrent());  // Ensure rawPower is always positive
+    float power = applyWattageCorrection(rawPower);
+    float current = power / busVoltage;
 
     const char* status = "Idle";
-    if (fabs(current) > 0.02) {
-        status = (current > 0) ? "Discharge" : "Charging";
+    if (fabs(current) > 0.03) {
+        status = (ina226.getCurrent() > 0) ? "Discharge" : "Charging";
     }
-
-    //Serial.printf("Voltage: %.2f V | Current: %.3f A | Power: %.2f W | Status: %s | Calib: %d\n",
-    //              busVoltage, fabs(current), power, status, currentCalibrationValue);
 
     handleSerialInput();
 
@@ -144,35 +154,35 @@ void loop() {
 
 // Apply correction using linear interpolation with extrapolation
 float applyVoltageCorrection(float rawVoltage) {
-    if (calibrationPointCount < 2) return rawVoltage; // Not enough points
+    if (voltageCalibrationPointCount < 2) return rawVoltage; // Not enough points
 
     // 1️⃣ Extrapolate for values BELOW the first point
-    if (rawVoltage < voltageCalibration[0].rawVoltage) {
-        float x0 = voltageCalibration[0].rawVoltage;
-        float y0 = voltageCalibration[0].measuredVoltage;
-        float x1 = voltageCalibration[1].rawVoltage;
-        float y1 = voltageCalibration[1].measuredVoltage;
+    if (rawVoltage < voltageCalibration[0].rawValue) {
+        float x0 = voltageCalibration[0].rawValue;
+        float y0 = voltageCalibration[0].measuredValue;
+        float x1 = voltageCalibration[1].rawValue;
+        float y1 = voltageCalibration[1].measuredValue;
         
         return y0 + ((rawVoltage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
     }
 
     // 2️⃣ Extrapolate for values ABOVE the last point
-    if (rawVoltage > voltageCalibration[calibrationPointCount - 1].rawVoltage) {
-        float x0 = voltageCalibration[calibrationPointCount - 2].rawVoltage;
-        float y0 = voltageCalibration[calibrationPointCount - 2].measuredVoltage;
-        float x1 = voltageCalibration[calibrationPointCount - 1].rawVoltage;
-        float y1 = voltageCalibration[calibrationPointCount - 1].measuredVoltage;
+    if (rawVoltage > voltageCalibration[voltageCalibrationPointCount - 1].rawValue) {
+        float x0 = voltageCalibration[voltageCalibrationPointCount - 2].rawValue;
+        float y0 = voltageCalibration[voltageCalibrationPointCount - 2].measuredValue;
+        float x1 = voltageCalibration[voltageCalibrationPointCount - 1].rawValue;
+        float y1 = voltageCalibration[voltageCalibrationPointCount - 1].measuredValue;
 
         return y0 + ((rawVoltage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
     }
 
     // 3️⃣ Standard Linear Interpolation for in-range values
-    for (int i = 0; i < calibrationPointCount - 1; i++) {
-        if (rawVoltage >= voltageCalibration[i].rawVoltage && rawVoltage <= voltageCalibration[i + 1].rawVoltage) {
-            float x0 = voltageCalibration[i].rawVoltage;
-            float y0 = voltageCalibration[i].measuredVoltage;
-            float x1 = voltageCalibration[i + 1].rawVoltage;
-            float y1 = voltageCalibration[i + 1].measuredVoltage;
+    for (int i = 0; i < voltageCalibrationPointCount - 1; i++) {
+        if (rawVoltage >= voltageCalibration[i].rawValue && rawVoltage <= voltageCalibration[i + 1].rawValue) {
+            float x0 = voltageCalibration[i].rawValue;
+            float y0 = voltageCalibration[i].measuredValue;
+            float x1 = voltageCalibration[i + 1].rawValue;
+            float y1 = voltageCalibration[i + 1].measuredValue;
 
             return y0 + ((rawVoltage - x0) * (y1 - y0) / (x1 - x0));  // Linear interpolation
         }
@@ -181,31 +191,95 @@ float applyVoltageCorrection(float rawVoltage) {
     return rawVoltage;
 }
 
+// Apply correction using linear interpolation with extrapolation
+float applyWattageCorrection(float rawWattage) {
+    if (wattageCalibrationPointCount < 2) return rawWattage; // Not enough points
+
+    // 1️⃣ Extrapolate for values BELOW the first point
+    if (rawWattage < wattageCalibration[0].rawValue) {
+        float x0 = wattageCalibration[0].rawValue;
+        float y0 = wattageCalibration[0].measuredValue;
+        float x1 = wattageCalibration[1].rawValue;
+        float y1 = wattageCalibration[1].measuredValue;
+        
+        return y0 + ((rawWattage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
+    }
+
+    // 2️⃣ Extrapolate for values ABOVE the last point
+    if (rawWattage > wattageCalibration[wattageCalibrationPointCount - 1].rawValue) {
+        float x0 = wattageCalibration[wattageCalibrationPointCount - 2].rawValue;
+        float y0 = wattageCalibration[wattageCalibrationPointCount - 2].measuredValue;
+        float x1 = wattageCalibration[wattageCalibrationPointCount - 1].rawValue;
+        float y1 = wattageCalibration[wattageCalibrationPointCount - 1].measuredValue;
+
+        return y0 + ((rawWattage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
+    }
+
+    // 3️⃣ Standard Linear Interpolation for in-range values
+    for (int i = 0; i < wattageCalibrationPointCount - 1; i++) {
+        if (rawWattage >= wattageCalibration[i].rawValue && rawWattage <= wattageCalibration[i + 1].rawValue) {
+            float x0 = wattageCalibration[i].rawValue;
+            float y0 = wattageCalibration[i].measuredValue;
+            float x1 = wattageCalibration[i + 1].rawValue;
+            float y1 = wattageCalibration[i + 1].measuredValue;
+
+            return y0 + ((rawWattage - x0) * (y1 - y0) / (x1 - x0));  // Linear interpolation
+        }
+    }
+
+    return rawWattage;
+}
+
 // Reset Voltage Calibration Points
 void resetVoltageCalibration() {
-    calibrationPointCount = 0;
-    memset(voltageCalibration, 0, sizeof(voltageCalibration));  
+    voltageCalibrationPointCount = 0;
+    EEPROM.put(EEPROM_ADDRESS_VOLTAGE_COUNT, voltageCalibrationPointCount);
     EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS, voltageCalibration);
-    EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), calibrationPointCount);
+    EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), voltageCalibrationPointCount);
     EEPROM.commit();
     Serial.println("All voltage calibration points cleared!");
 }
 
+// Reset Wattage Calibration Points
+void resetWattageCalibration() {
+    wattageCalibrationPointCount = 0;
+    EEPROM.put(EEPROM_ADDRESS_WATTAGE_COUNT, wattageCalibrationPointCount);
+    EEPROM.put(EEPROM_ADDRESS_WATTAGE_POINTS, wattageCalibration);
+    EEPROM.put(EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration), wattageCalibrationPointCount);
+    EEPROM.commit();
+    Serial.println("All wattage calibration points cleared!");
+}
+
 // Function to print all calibration points to the Serial Monitor
 void showCalibrationPoints() {
-  Serial.println("Calibration Points:");
-  if (calibrationPointCount <= 0) {
-    Serial.println("No calibration points available.");
-    return;
+  Serial.println("Voltage Calibration Points:");
+  if (voltageCalibrationPointCount <= 0) {
+    Serial.println("No voltage calibration points available.");
+  } else {
+    for (int i = 0; i < voltageCalibrationPointCount; i++) {
+      Serial.print("Point ");
+      Serial.print(i);
+      Serial.print(": Raw Voltage = ");
+      Serial.print(voltageCalibration[i].rawValue, 2);
+      Serial.print(" V, Calibrated Voltage = ");
+      Serial.print(voltageCalibration[i].measuredValue, 2);
+      Serial.println(" V");
+    }
   }
-  for (int i = 0; i < calibrationPointCount; i++) {
-    Serial.print("Point ");
-    Serial.print(i);
-    Serial.print(": Raw Voltage = ");
-    Serial.print(voltageCalibration[i].rawVoltage, 2);
-    Serial.print(" V, Calibrated Voltage = ");
-    Serial.print(voltageCalibration[i].measuredVoltage, 2);
-    Serial.println(" V");
+
+  Serial.println("Wattage Calibration Points:");
+  if (wattageCalibrationPointCount <= 0) {
+    Serial.println("No wattage calibration points available.");
+  } else {
+    for (int i = 0; i < wattageCalibrationPointCount; i++) {
+      Serial.print("Point ");
+      Serial.print(i);
+      Serial.print(": Raw Wattage = ");
+      Serial.print(wattageCalibration[i].rawValue, 2);
+      Serial.print(" W, Calibrated Wattage = ");
+      Serial.print(wattageCalibration[i].measuredValue, 2);
+      Serial.println(" W");
+    }
   }
 }
 
@@ -216,38 +290,63 @@ void handleSerialInput() {
         input.trim();
 
         if (input.equalsIgnoreCase("stats")) {
-            Serial.printf("Number of calibration points: %d\n", calibrationPointCount);
+            Serial.printf("Number of voltage calibration points: %d\n", voltageCalibrationPointCount);
+            Serial.printf("Number of wattage calibration points: %d\n", wattageCalibrationPointCount);
         }
-        else if (input.startsWith("+a") || input.startsWith("-a")) {
-            int adjustment = input.substring(2).toInt();
-            ina226.adjCalibration(adjustment);
-            currentCalibrationValue = ina226.getCalibration();
-            Serial.printf("Adjusted Current Calibration: %d\n", currentCalibrationValue);
-        } 
         else if (input.startsWith("addv")) {  
-            if (calibrationPointCount < MAX_CALIBRATION_POINTS) {
+            if (voltageCalibrationPointCount < MAX_CALIBRATION_POINTS) {
                 float rawVoltage = ina226.getVoltage();
                 float measuredVoltage = input.substring(5).toFloat();
-                voltageCalibration[calibrationPointCount++] = {measuredVoltage, rawVoltage};
+                voltageCalibration[voltageCalibrationPointCount++] = {measuredVoltage, rawVoltage};
+                sortCalibrationPoints(voltageCalibration, voltageCalibrationPointCount);
                 Serial.printf("Added Voltage Calibration Point: %.2fV (INA226) → %.2fV (Multimeter)\n", rawVoltage, measuredVoltage);
             } else {
-                Serial.println("Max calibration points reached!");
+                Serial.println("Max voltage calibration points reached!");
+            }
+        }
+        else if (input.startsWith("addw")) {  
+            if (wattageCalibrationPointCount < MAX_CALIBRATION_POINTS) {
+                float rawWattage = fabs(ina226.getVoltage() * ina226.getCurrent());  // Ensure rawWattage is always positive
+                float measuredWattage = fabs(input.substring(5).toFloat());  // Ensure measuredWattage is always positive
+                wattageCalibration[wattageCalibrationPointCount++] = {measuredWattage, rawWattage};
+                sortCalibrationPoints(wattageCalibration, wattageCalibrationPointCount);
+                Serial.printf("Added Wattage Calibration Point: %.2fW (INA226) → %.2fW (Multimeter)\n", rawWattage, measuredWattage);
+            } else {
+                Serial.println("Max wattage calibration points reached!");
             }
         }
         else if (input.equalsIgnoreCase("resetv")) {  
             resetVoltageCalibration();
         }
+        else if (input.equalsIgnoreCase("resetw")) {  
+            resetWattageCalibration();
+        }
         else if (input.equalsIgnoreCase("save")) {
             EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS, voltageCalibration);
-            EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), calibrationPointCount);
+            EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), voltageCalibrationPointCount);
+            EEPROM.put(EEPROM_ADDRESS_WATTAGE_POINTS, wattageCalibration);
+            EEPROM.put(EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration), wattageCalibrationPointCount);
             EEPROM.commit();
-            Serial.println("Voltage Calibration Saved!");
+            Serial.println("Calibration Saved!");
         }
-        else if(input.equalsIgnoreCase("showv")){
+        else if(input.equalsIgnoreCase("show")){
             showCalibrationPoints();
         }
         else {
-          Serial.println("Invalid command! Use +a10 / -a10 / addv[voltage] / resetv / save / showv");
+          Serial.println("Invalid command! Use +a10 / -a10 / addv[voltage] / addw[wattage] / resetv / resetw / save / show");
+        }
+    }
+}
+
+// Sort calibration points by rawValue
+void sortCalibrationPoints(CalibrationPoint* points, int count) {
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = 0; j < count - i - 1; j++) {
+            if (points[j].rawValue > points[j + 1].rawValue) {
+                CalibrationPoint temp = points[j];
+                points[j] = points[j + 1];
+                points[j + 1] = temp;
+            }
         }
     }
 }
