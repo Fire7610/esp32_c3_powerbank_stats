@@ -2,40 +2,31 @@
 #include <GyverINA.h>
 #include <U8g2lib.h>
 #include <EEPROM.h>
-#include <cmath>  // Use <cmath> instead of <math.h>
+#include <cmath>
 
-// I2C pins for ESP32-C3
 #define I2C_SDA 5
 #define I2C_SCL 6
 
-// Button pin (active LOW with internal pull-up)
 #define BUTTON_PIN 4
 
-// INA226 settings
 const float SHUNT_OHMS = 0.005;
 const float MAX_EXPECTED_AMPS = 7.0;
 
-// EEPROM Addresses
 #define EEPROM_ADDRESS_CURRENT 0
 #define EEPROM_ADDRESS_VOLTAGE_POINTS 10  
 #define EEPROM_ADDRESS_VOLTAGE_COUNT (EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration))
 #define EEPROM_ADDRESS_WATTAGE_POINTS (EEPROM_ADDRESS_VOLTAGE_COUNT + sizeof(voltageCalibrationPointCount))
 #define EEPROM_ADDRESS_WATTAGE_COUNT (EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration))
 
-// Max calibration points
 #define MAX_CALIBRATION_POINTS 50  
-
-// Calibration point struct
 struct CalibrationPoint {
     float measuredValue;  
     float rawValue;       
 };
 
-// Create INA226 object
 INA226 ina226(SHUNT_OHMS, MAX_EXPECTED_AMPS, 0x40);
 
-// Create OLED display object
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0,U8X8_PIN_NONE);
 
 bool displayEnabled = true;
 unsigned long lastButtonPress = 0;
@@ -53,7 +44,7 @@ void setup() {
 
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     Wire.begin(I2C_SDA, I2C_SCL);
-    EEPROM.begin(2048);  // Increased storage size for large calibration points
+    EEPROM.begin(2048);
 
     if (!ina226.begin()) {
         Serial.println("ERROR: INA226 not detected!");
@@ -78,7 +69,6 @@ void setup() {
     EEPROM.get(EEPROM_ADDRESS_WATTAGE_POINTS, wattageCalibration);
     EEPROM.get(EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration), wattageCalibrationPointCount);
 
-    // Prevent invalid EEPROM data corruption
     if (voltageCalibrationPointCount > MAX_CALIBRATION_POINTS || voltageCalibrationPointCount < 0) {
         voltageCalibrationPointCount = 0;
     }
@@ -117,7 +107,7 @@ void loop() {
 
     float rawBusVoltage = ina226.getVoltage();
     float busVoltage = applyVoltageCorrection(rawBusVoltage);
-    float rawPower = fabs(busVoltage * ina226.getCurrent());  // Ensure rawPower is always positive
+    float rawPower = fabs(busVoltage * ina226.getCurrent());
     float power = applyWattageCorrection(rawPower);
     float current = power / busVoltage;
 
@@ -155,11 +145,11 @@ void loop() {
     delay(1000);
 }
 
-// Apply correction using linear interpolation with extrapolation
+//linear interpolation with extrapolation
 float applyVoltageCorrection(float rawVoltage) {
-    if (voltageCalibrationPointCount < 2) return rawVoltage; // Not enough points
+    if (voltageCalibrationPointCount < 2) return rawVoltage;
 
-    // 1️⃣ Extrapolate for values BELOW the first point
+    //values BELOW the first point
     if (rawVoltage < voltageCalibration[0].rawValue) {
         float x0 = voltageCalibration[0].rawValue;
         float y0 = voltageCalibration[0].measuredValue;
@@ -169,7 +159,7 @@ float applyVoltageCorrection(float rawVoltage) {
         return y0 + ((rawVoltage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
     }
 
-    // 2️⃣ Extrapolate for values ABOVE the last point
+    //values ABOVE the last point
     if (rawVoltage > voltageCalibration[voltageCalibrationPointCount - 1].rawValue) {
         float x0 = voltageCalibration[voltageCalibrationPointCount - 2].rawValue;
         float y0 = voltageCalibration[voltageCalibrationPointCount - 2].measuredValue;
@@ -179,7 +169,7 @@ float applyVoltageCorrection(float rawVoltage) {
         return y0 + ((rawVoltage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
     }
 
-    // 3️⃣ Standard Linear Interpolation for in-range values
+    //in-range values
     for (int i = 0; i < voltageCalibrationPointCount - 1; i++) {
         if (rawVoltage >= voltageCalibration[i].rawValue && rawVoltage <= voltageCalibration[i + 1].rawValue) {
             float x0 = voltageCalibration[i].rawValue;
@@ -194,11 +184,11 @@ float applyVoltageCorrection(float rawVoltage) {
     return rawVoltage;
 }
 
-// Apply correction using linear interpolation with extrapolation
+//=linear interpolation with extrapolation
 float applyWattageCorrection(float rawWattage) {
     if (wattageCalibrationPointCount < 2) return rawWattage; // Not enough points
 
-    // 1️⃣ Extrapolate for values BELOW the first point
+    //values BELOW the first point
     if (rawWattage < wattageCalibration[0].rawValue) {
         float x0 = wattageCalibration[0].rawValue;
         float y0 = wattageCalibration[0].measuredValue;
@@ -208,7 +198,7 @@ float applyWattageCorrection(float rawWattage) {
         return y0 + ((rawWattage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
     }
 
-    // 2️⃣ Extrapolate for values ABOVE the last point
+    //values ABOVE the last point
     if (rawWattage > wattageCalibration[wattageCalibrationPointCount - 1].rawValue) {
         float x0 = wattageCalibration[wattageCalibrationPointCount - 2].rawValue;
         float y0 = wattageCalibration[wattageCalibrationPointCount - 2].measuredValue;
@@ -218,7 +208,7 @@ float applyWattageCorrection(float rawWattage) {
         return y0 + ((rawWattage - x0) * (y1 - y0) / (x1 - x0));  // Extrapolation
     }
 
-    // 3️⃣ Standard Linear Interpolation for in-range values
+    //in-range values
     for (int i = 0; i < wattageCalibrationPointCount - 1; i++) {
         if (rawWattage >= wattageCalibration[i].rawValue && rawWattage <= wattageCalibration[i + 1].rawValue) {
             float x0 = wattageCalibration[i].rawValue;
