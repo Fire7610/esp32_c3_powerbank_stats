@@ -19,7 +19,6 @@ const float MAX_EXPECTED_AMPS = 7.0;
 #define EEPROM_ADDRESS_WATTAGE_POINTS (EEPROM_ADDRESS_VOLTAGE_COUNT + sizeof(voltageCalibrationPointCount))
 #define EEPROM_ADDRESS_WATTAGE_COUNT (EEPROM_ADDRESS_WATTAGE_POINTS + (sizeof(CalibrationPoint) * MAX_CALIBRATION_POINTS))
 
-
 #define MAX_CALIBRATION_POINTS 50  
 struct CalibrationPoint {
     float measuredValue;  
@@ -149,7 +148,13 @@ void loop() {
 
 //linear interpolation with extrapolation
 float applyVoltageCorrection(float rawVoltage) {
-    if (voltageCalibrationPointCount < 2) return rawVoltage;
+    //edge cases
+    if (voltageCalibrationPointCount == 1) {
+        return voltageCalibration[0].measuredValue;
+    }
+    if (rawVoltage == voltageCalibration[0].rawValue) {
+        return voltageCalibration[0].measuredValue;
+    }
 
     //values BELOW the first point
     if (rawVoltage < voltageCalibration[0].rawValue) {
@@ -188,7 +193,13 @@ float applyVoltageCorrection(float rawVoltage) {
 
 //=linear interpolation with extrapolation
 float applyWattageCorrection(float rawWattage) {
-    if (wattageCalibrationPointCount < 2) return rawWattage; // Not enough points
+    //edge cases
+    if(wattageCalibrationPointCount == 1){
+        return wattageCalibration[0].measuredValue;
+    }
+    if (rawWattage == wattageCalibration[0].rawValue) {
+        return wattageCalibration[0].measuredValue;
+    }
 
     //values BELOW the first point
     if (rawWattage < wattageCalibration[0].rawValue) {
