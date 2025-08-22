@@ -3,17 +3,16 @@
 #include <U8g2lib.h>
 #include <EEPROM.h>
 #include <cmath>
+#include <esp_sleep.h>
 
 #define I2C_SDA 5
 #define I2C_SCL 6
-
 #define BUTTON_PIN 4
 
 const float SHUNT_OHMS = 0.005;
 const float MAX_EXPECTED_AMPS = 7.0;
 
 #define EEPROM_ADDRESS_CURRENT 0
-
 #define EEPROM_ADDRESS_VOLTAGE_POINTS 10
 #define EEPROM_ADDRESS_VOLTAGE_COUNT (EEPROM_ADDRESS_VOLTAGE_POINTS + (sizeof(CalibrationPoint) * MAX_CALIBRATION_POINTS))
 #define EEPROM_ADDRESS_WATTAGE_POINTS (EEPROM_ADDRESS_VOLTAGE_COUNT + sizeof(voltageCalibrationPointCount))
@@ -49,7 +48,7 @@ void setup() {
 
     if (!ina226.begin()) {
         Serial.println("ERROR: INA226 not detected!");
-        while (1);
+        //while (1);
     }
 
     // Load saved current calibration from EEPROM
@@ -87,6 +86,7 @@ void setup() {
     u8g2.begin();
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_7x14_tf);
+    u8g2.setDisplayRotation(U8G2_R2);
     u8g2.drawStr(0, 14, "Powerbank Ready");
     u8g2.sendBuffer();
     delay(500);
@@ -114,7 +114,7 @@ void loop() {
 
     const char* status = "Idle";
     if (fabs(current) > 0.03) {
-        status = (ina226.getCurrent() > 0) ? "Discharge" : "Charging";
+        status = (ina226.getCurrent() > 0) ? "Discharging" : "Charging";
     }
 
     handleSerialInput();
@@ -126,24 +126,60 @@ void loop() {
 
         char buf[32];
         snprintf(buf, sizeof(buf), "V: %.2fV", busVoltage);
-        u8g2.drawStr(0, 14, buf);
+        u8g2.drawStr((128 - u8g2.getStrWidth(buf)) / 2, 14, buf);
 
         snprintf(buf, sizeof(buf), "I: %.3fA", fabs(current));
-        u8g2.drawStr(64, 14, buf);
-
-        snprintf(buf, sizeof(buf), "P: %.2fW", power);
-        
         u8g2.drawStr((128 - u8g2.getStrWidth(buf)) / 2, 28, buf);
 
-        snprintf(buf, sizeof(buf), "%s", status);
+        snprintf(buf, sizeof(buf), "P: %.3fW", abs(power));
         u8g2.drawStr((128 - u8g2.getStrWidth(buf)) / 2, 42, buf);
+
+        snprintf(buf, sizeof(buf), "%s", status);
+        u8g2.drawStr((128 - u8g2.getStrWidth(buf)) / 2, 56, buf);
 
         u8g2.sendBuffer();
     } else {
         u8g2.setPowerSave(1);
+        ultraPowerSavingMode();
     }
 
-    delay(1000);
+    delay(100);
+}
+
+void ultraPowerSavingMode() {
+    static unsigned long screenOffTime = 0;
+    static unsigned long lastActivityTime = millis();
+    static unsigned long lastPrintTime = 0;
+
+    if (millis() - lastActivityTime > 60000) {
+        if (millis() - lastPrintTime > 60000) { 
+            Serial.println("System inactive for 1 minute...");
+            lastPrintTime = millis();
+        }
+    } else {
+        lastPrintTime = 0; 
+    }
+
+    if (!displayEnabled) {
+        if (screenOffTime == 0) {
+            screenOffTime = millis();
+        } else if (millis() - screenOffTime > 300000) { 
+            Serial.println("Entering Ultra Power Saving Mode...");
+            
+            Serial.println("Turning ina226 off...");
+            ina226.sleep(true); 
+
+            Serial.println("Turning display off...");
+            u8g2.setPowerSave(1);
+
+            esp_deep_sleep_enable_gpio_wakeup(1ULL << GPIO_NUM_4, ESP_GPIO_WAKEUP_GPIO_LOW);
+
+            Serial.println("ZZZzzzz...");
+            esp_deep_sleep_start();
+        }
+    } else {
+        screenOffTime = 0; 
+    }
 }
 
 //linear interpolation with extrapolation
@@ -192,6 +228,7 @@ float applyVoltageCorrection(float rawVoltage) {
 }
 
 //=linear interpolation with extrapolation
+
 float applyWattageCorrection(float rawWattage) {
     //edge cases
     if(wattageCalibrationPointCount == 1){
@@ -295,11 +332,7 @@ void handleSerialInput() {
         String input = Serial.readStringUntil('\n');
         input.trim();
 
-        if (input.equalsIgnoreCase("stats")) {
-            Serial.printf("Number of voltage calibration points: %d\n", voltageCalibrationPointCount);
-            Serial.printf("Number of wattage calibration points: %d\n", wattageCalibrationPointCount);
-        }
-        else if (input.startsWith("addv")) {  
+        if (input.startsWith("addv")) {  
             if (voltageCalibrationPointCount < MAX_CALIBRATION_POINTS) {
                 float rawVoltage = ina226.getVoltage();
                 float measuredVoltage = input.substring(5).toFloat();
@@ -335,7 +368,7 @@ void handleSerialInput() {
             EEPROM.commit();
             Serial.println("Calibration Saved!");
         }
-        else if(input.equalsIgnoreCase("show")){
+        else if (input.equalsIgnoreCase("show")){
             showCalibrationPoints();
         }
         else if (input.startsWith("removev")) {  
@@ -378,5 +411,106 @@ void sortCalibrationPoints(CalibrationPoint* points, int count) {
                 points[j + 1] = temp;
             }
         }
+    }
+}
+
+void handleSerialInputWithSwitch(){
+    if(Serial.available()){
+        String input = Serial.readStringUntil('\n');
+        input.trim();
+
+        String command = input.substring(0, input.indexOf(' '));
+        String value = input.substring(input.indexOf(' ')+1);
+
+        command.toLowerCase();
+        for (int i = 0; i < command.length(); i++) {
+            command[i] = tolower(command[i]);
+        }
+
+        int commandHash = 0;
+        int index;
+
+        if (command.startsWith("addv")) commandHash = 1;
+        else if (command.startsWith("addw")) commandHash = 2;
+        else if (command.equalsIgnoreCase("resetv")) commandHash = 3;
+        else if (command.equalsIgnoreCase("resetw")) commandHash = 4;
+        else if (command.startsWith("removew")) commandHash = 5;
+        else if (command.startsWith("removev")) commandHash = 6;
+        else if (command.equalsIgnoreCase("save")) commandHash = 7;
+        else if (command.equalsIgnoreCase("show")) commandHash = 8;
+
+        switch (commandHash)
+        {
+        case 1:// addv
+            if (voltageCalibrationPointCount < MAX_CALIBRATION_POINTS) {
+                float rawVoltage = ina226.getVoltage();
+                float measuredVoltage = input.substring(5).toFloat();
+                voltageCalibration[voltageCalibrationPointCount++] = {measuredVoltage, rawVoltage};
+                sortCalibrationPoints(voltageCalibration, voltageCalibrationPointCount);
+                Serial.printf("Added Voltage Calibration Point: %.2fV (INA226) → %.2fV (Multimeter)\n", rawVoltage, measuredVoltage);
+            } else {
+                Serial.println("Max voltage calibration points reached!");
+            }
+            break;
+        
+        case 2: //addw
+            if (wattageCalibrationPointCount < MAX_CALIBRATION_POINTS) {
+                float rawWattage = fabs(ina226.getVoltage() * ina226.getCurrent());  // Ensure rawWattage is always positive
+                float measuredWattage = fabs(input.substring(5).toFloat());  // Ensure measuredWattage is always positive
+                wattageCalibration[wattageCalibrationPointCount++] = {measuredWattage, rawWattage};
+                sortCalibrationPoints(wattageCalibration, wattageCalibrationPointCount);
+                Serial.printf("Added Wattage Calibration Point: %.2fW (INA226) → %.2fW (Multimeter)\n", rawWattage, measuredWattage);
+            } else {
+                Serial.println("Max wattage calibration points reached!");
+            }
+
+            break;
+        case 3: //resetv
+            resetVoltageCalibration();
+            break;
+        case 4: //resetw
+            resetWattageCalibration();
+            break;
+        case 5: //removew
+            index = input.substring(8).toInt();
+            if (index >= 0 && index < wattageCalibrationPointCount) {
+                for (int i = index; i < wattageCalibrationPointCount - 1; i++) {
+                    wattageCalibration[i] = wattageCalibration[i + 1];
+                }
+                wattageCalibrationPointCount--;
+                Serial.printf("Removed Wattage Calibration Point at index %d\n", index);
+            } else {
+                Serial.println("Invalid index for wattage calibration point!");
+            }
+            break;
+        case 6: //removev
+            index = input.substring(8).toInt();
+            if (index >= 0 && index < voltageCalibrationPointCount) {
+                for (int i = index; i < voltageCalibrationPointCount - 1; i++) {
+                    voltageCalibration[i] = voltageCalibration[i + 1];
+                }
+                voltageCalibrationPointCount--;
+                Serial.printf("Removed Voltage Calibration Point at index %d\n", index);
+            } else {
+                Serial.println("Invalid index for voltage calibration point!");
+            }
+            break; 
+        case 7: //save
+            EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS, voltageCalibration);
+            EEPROM.put(EEPROM_ADDRESS_VOLTAGE_POINTS + sizeof(voltageCalibration), voltageCalibrationPointCount);
+            EEPROM.put(EEPROM_ADDRESS_WATTAGE_POINTS, wattageCalibration);
+            EEPROM.put(EEPROM_ADDRESS_WATTAGE_POINTS + sizeof(wattageCalibration), wattageCalibrationPointCount);
+            EEPROM.commit();
+            Serial.println("Calibration Saved!");
+            break;
+        case 8: //show
+            showCalibrationPoints();
+            break;
+
+        default:
+            Serial.println("Invalid command!\n addv[voltage] / addw[wattage]\n resetv / resetw\n removew[index] removev[index] \nsave / show");
+            break;
+        }
+
     }
 }
